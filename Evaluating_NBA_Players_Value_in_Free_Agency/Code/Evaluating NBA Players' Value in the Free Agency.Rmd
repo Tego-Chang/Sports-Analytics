@@ -1,0 +1,1061 @@
+---
+title: "Evaluating NBA Players' Value in the Free Agency"
+author: "Tego Chang"
+date: "11/27/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(sjlabelled) # to remove labels
+library(ggplot2)
+library(xtable)
+library(arm) # for binnedpolot
+library(tidyr) # data wrangling
+library(caret) # for confusion matrix
+library(pROC) # for roc curve
+library(stargazer) # for displaying summary of model
+```
+
+## Summary
+In this report, we aim to evaluate the value of NBA players in terms of the salary they could earn next season, based on their performance in the current season. During the analyzing process, we have conducted data wrangling, exploratory data analysis (EDA), and modeling by multiple linear regression with and without considering a hierarchical framework. With our proposed model, we have provided a prediction of players' salary in the 2021/22 season with a 77% Hit Rate. Moreover, we analyzed the overpaid and lowballed cases and identified the metrics we shall additionally consider to further explore the topic.  
+
+## Introduction
+For general managers or the front office in NBA teams, one of the major tasks is to decide what contracts their teams shall provide for the players they are interested in based on these players' values from and off the court. As the budget for each team is regulated by the league, called (Team) Salary Cap, pursuing the players they want with a reasonable or even economical cost has been more critical than ever. 
+
+The primary question we would like to answer in this analysis is what statistics or factors could be influential to our forecasting of players' salaries next season. Further, we would also pay attention to if and what are the potential interactions between variables in the collected dataset.
+
+## Data
+The response variable in this research is composed of two items, player's salary in the season, _SALARY_, and the salary cap for each team _SALARY_CAP_. These two types of data are collected from HOOPSHYPE and Basketball Reference websites; On the other hand, the response variable, _SALARY_100_, is obtained by diving _SALARY_ with _SALARY_CAP_ and multiple 100 to make it the percentage of the player's salary accounts for in the team's budget. 
+
+The predictors are separated into two categories, the traditional statistics and the advanced ones, and they are both collected from the official website of the NBA.The traditional statistics we picked were _AGE_, _GP_ (game played), _W_ (wins), _L_ (Losses), _PTS_ (average points per game), _REB_ (average rebounds per game), _AST_ (average assists per game), _TOV_ (average turnovers per game), _STL_ (average steals per game), _BLK_ (average blocks per game), _3PM_ (average three-pointers made per game), _+/-_ (plus-minus, how many points the team can outscore its opponent when the player is on the court); The advanced ones are _OFFRTG_, _DEFRTG_, and _NETRTG_ (correspondingly, the team's offensive, defensive, and overall performance scores when the player is on the court). 
+
+Once all the above are collected, we then perform data wrangling to make our dataset clean enough for the following analysis. Firstly, we merge the traditional and advanced statistics, and then we combine the player's salary with the player's performance. Lastly, we concatenate these observations on an annual basis. As the source data we collected were complete, we did not encounter any missing data issues. The arranged training data includes 3835 observations, which are the 10-year NBA players' data from season 2010/11 to 2019/20. The testing data is the one in season 2020/21. We plan to build a multiple linear regression model, train it with the 10-season data, and apply the model to predict the player's salary in the 2020/21 season. Variables like _TEAM_ and _SEASON_ are considered as group variables when hierarchical modeling is conducted. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+getwd()
+# training <- read.csv("training_unbiased.csv", header=T, 
+#                      colClasses=c("character","numeric","factor","factor",
+#                                   "numeric","numeric","numeric","numeric", 
+#                                   "numeric","numeric","numeric","numeric",
+#                                   "numeric","numeric","numeric","numeric",
+#                                   "numeric","numeric","numeric","numeric"))
+training <- read.csv("../Data/training.csv", header=T, 
+                     colClasses=c("character","numeric","factor","factor",
+                                  "numeric","numeric","numeric","numeric", 
+                                  "numeric","numeric","numeric","numeric",
+                                  "numeric","numeric","numeric","numeric",
+                                  "numeric","numeric","numeric","numeric"))
+testing <- read.csv("../Data/testing.csv",header=T, 
+                     colClasses=c("character","numeric","factor","factor",
+                                  "numeric","numeric","numeric","numeric", 
+                                  "numeric","numeric","numeric","numeric",
+                                  "numeric","numeric","numeric","numeric",
+                                  "numeric","numeric","numeric","numeric"))
+# training[training$SALARY == 0,]$SALARY = 1 # smoothing for log(SALARY_100) in the following
+# training[training$SALARY == 1,]
+training$SALARY_100 <- (training$SALARY/training$SALARY_CAP)*100
+testing$SALARY_100 <- (testing$SALARY/testing$SALARY_CAP)*100
+
+# head(training)
+str(training)
+# rownames(training)
+# summary(training)
+
+# str(testing)
+```
+
+In the EDA stage, we first checked if our response variable, _SALARY_100_, has fitted normal distribution. We found it's not so we then have it transformed with logarithm to make it roughly follows the normal distribution assumption for the response in linear regression as the below figures show. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.show='hold', out.width="50%"}
+# check if the response variable is normal
+ggplot(training,aes(x=SALARY_100)) +
+  geom_histogram(aes(y=..density..),
+                 color="black",linetype="dashed", 
+                 binwidth = 2, fill=rainbow(27)) +
+  geom_density(alpha=.25, fill="lightblue") +
+  scale_fill_brewer(palette="Blues") +
+  labs(title="Distribution of Salary/Cap Percentage",y="Density") + 
+  theme_classic() + theme(legend.position="none")
+
+ggplot(training,aes(x=log(SALARY_100))) +
+  geom_histogram(aes(y=..density..),
+                 color="black",linetype="dashed", 
+                 binwidth = 0.5, fill=rainbow(16)) +
+  geom_density(alpha=.25, fill="lightblue") +
+  scale_fill_brewer(palette="Blues") +
+  labs(title="Distribution of log(Salary/Cap Percentage)",y="Density") + 
+  theme_classic() + theme(legend.position="none")
+```
+
+Then, we explored the relationship between predictors and the response. We observed some counter-intuitive trends for _AGE_ v.s. _log(SALARY_100)_ and _TOV_ v.s. _log(SALARY_100)_. As we are talking about professional sports, we tend to think a younger player has the advantage to be faster and sustainable compared with the old ones, which might lead to better performance and higher salary; On the other side, having turnovers means you waste a chance to score, which is bad for the team, and it's reasonable to imagine it will have a negative relationship with the salary. However, it seems also not true based on the below figures. The phenomenon will both be explained in the following sections. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', fig.show='hold', out.width="50%"}
+# log(SALARY_100) vs AGE => interesting (counter-intuitive)
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(Salary/Cap Percentage) vs AGE",x="AGE",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs TOV => interesting (counter-intuitive)
+ggplot(training,aes(x=TOV, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(Salary/Cap Percentage) vs Turnovers",x="Turnovers",y="log(SALARY_100)") +
+  theme()
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## Check main effects
+# log(SALARY_100) vs SEASON
+ggplot(training,aes(x=SEASON, y=log(SALARY_100), fill=SEASON)) +
+  geom_boxplot() + #coord_flip() +
+  scale_fill_brewer(palette="Blues") +
+  labs(title="SEASON vs log(SALARY_100)",x="SEASON",y="log(SALARY_100)") + 
+  theme_classic() + theme(legend.position="none")
+
+# log(SALARY_100) vs AGE => interesting (counter-intuitive)
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="Player's Salary vs Age",x="Age",y="log(SALARY_100)") +
+  theme()
+
+ggplot(training,aes(x=AGE, y=SALARY_100)) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100 vs AGE",x="AGE",y="SALARY_100") +
+  theme()
+
+# log(SALARY_100) vs GP
+ggplot(training,aes(x=GP, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs GP",x="GP",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs W
+ggplot(training,aes(x=W, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Wins",x="Wins",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs L => interesting (counter-intuitive)
+ggplot(training,aes(x=L, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="Player's Salary vs Losses",x="Losses",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs PTS
+ggplot(training,aes(x=PTS, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Points",x="Points",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs X3PM
+ggplot(training,aes(x=X3PM, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs 3 pointers made",x="X3PM",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs REB
+ggplot(training,aes(x=REB, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Rebound",x="REB",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs AST
+ggplot(training,aes(x=AST, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Assist",x="Assist",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs TOV => interesting (counter-intuitive)
+ggplot(training,aes(x=TOV, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="Player's Salary vs Turnovers",x="Turnovers",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs STL
+ggplot(training,aes(x=STL, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Steals",x="Steals",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs BLK
+ggplot(training,aes(x=BLK, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Blocks",x="Blocks",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs X...
+ggplot(training,aes(x=X..., y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs +/-",x="+/-",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs OFFRTG
+ggplot(training,aes(x=OFFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Offensive Rating",
+       x="Offensive Rating",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs DEFRTG => Interesting 
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Defensive Rating",
+       x="Defensive Rating",y="log(SALARY_100)") +
+  theme()
+
+# log(SALARY_100) vs NETRTG
+ggplot(training,aes(x=NETRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .7) +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Net Rating",
+       x="Net Rating",y="log(SALARY_100)") +
+  theme()
+
+# take aways:
+# - All predictors have positive proportions with response:
+#   - less obvious: DEFRTG
+#   - counter-intuitive: TOV, L, AGE
+# - Can include all predictors in MLR
+```
+
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+training$PTS_fac <- "1. PTS < 10"
+training$PTS_fac[(training$PTS >=10) & (training$PTS < 19)] <- "2. 10 <= PTS < 20"
+training$PTS_fac[(training$PTS >=20) ] <- "3. PTS > 20"
+training$PTS_fac <- as.factor(training$PTS_fac)
+training[,c("PTS", "PTS_fac")]
+
+training$REB_fac <- "1. REB < 5"
+training$REB_fac[(training$REB >=5) & (training$REB < 10)] <- "2. 5 <= REB < 10"
+training$REB_fac[(training$REB >=10) ] <- "3. REB > 10"
+training$REB_fac <- as.factor(training$REB_fac)
+training[,c("REB", "REB_fac")]
+
+training$AST_fac <- "1. AST < 2.5"
+training$AST_fac[(training$AST >=2.5) & (training$AST < 5)] <- "2. 2.5 <= AST < 5"
+training$AST_fac[(training$AST >=5) ] <- "3. AST > 5"
+training$AST_fac <- as.factor(training$AST_fac)
+training[,c("AST", "AST_fac")]
+
+training$TOV_fac <- "1. TOV < 1.5"
+training$TOV_fac[(training$TOV >=1.5) & (training$TOV < 3)] <- "2. 1.5 <= TOV < 3"
+training$TOV_fac[(training$TOV >=3) ] <- "3. TOV >= 3"
+training$TOV_fac <- as.factor(training$TOV_fac)
+training[,c("TOV", "TOV_fac")]
+# summary(training)
+```
+
+At the last in our EDA, we investigated if there are interactions between predictors. We found _DEFRTG_ has interactions with _PTS_ and _REB_. The latter one is again very counter-intuitive from the perspective of domain knowledge, basketball, as having more rebounds for a player tends to make people believe that the player performs well on the defensive end. We'll include these interactions during the model selection process. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', fig.show='hold', out.width="50%" }
+# log(SALARY_100) and DEFRTG by PTS => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(Salary/Cap Percentage) vs Defensive Rating by Points",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and DEFRTG by REB => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(Salary/Cap Percentage) vs Defensive Rating by Rebounds",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+```
+
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## interactions ##
+# investigate from the interesting terms, AGE, L, TOV, OFFRTG, DEFRTG, NETRTG by PTS, REB, AST, TOV
+
+# log(SALARY_100) and AGE by PTS => No interaction
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs AGE by Points",x="AGE",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and L by PTS => shall include this interaction
+ggplot(training,aes(x=L, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Losses by Points",x="Losses",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and TOV by PTS => No interaction
+ggplot(training,aes(x=TOV, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="Player's Salary vs Turnovers by Points",x="Turnovers",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and OFFRTG by PTS => No interaction
+ggplot(training,aes(x=OFFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Offensive Rating by Points",x="Offensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and DEFRTG by PTS => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Defensive Rating by Points",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and NETRTG by PTS => No interaction
+ggplot(training,aes(x=NETRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Net Rating by Points",x="Net Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ PTS_fac, ncol=3)
+
+# log(SALARY_100) and AGE by REB => No interaction
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs AGE by REB",x="AGE",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and L by REB => shall include this interaction
+ggplot(training,aes(x=L, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Losses by REB",x="Losses",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and TOV by REB => No obvious interaction
+ggplot(training,aes(x=TOV, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Turnovers by REB",x="Turnovers",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and OFFRTG by REB => No interaction
+ggplot(training,aes(x=OFFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Offensive Rating by REB",x="Offensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and DEFRTG by REB => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Defensive Rating by REB",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and NETRTG by REB => No interaction
+ggplot(training,aes(x=NETRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Net Rating by REB",x="Net Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ REB_fac, ncol=3)
+
+# log(SALARY_100) and AGE by AST => No interaction
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs AGE by AST",x="AGE",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+# log(SALARY_100) and L by AST => shall include this interaction
+ggplot(training,aes(x=L, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Losses by AST",x="Losses",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+# log(SALARY_100) and TOV by AST => No interaction
+ggplot(training,aes(x=TOV, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Turnovers by AST",x="Turnovers",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+# log(SALARY_100) and OFFRTG by AST => No interaction
+ggplot(training,aes(x=OFFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Offensive Rating by AST",x="Offensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+# log(SALARY_100) and DEFRTG by AST => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Defensive Rating by AST",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+# log(SALARY_100) and NETRTG by AST => No interaction
+ggplot(training,aes(x=NETRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Net Rating by AST",x="Net Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ AST_fac, ncol=3)
+
+## interaction combination based on domain knowledge
+# investigate from the interesting terms, AGE, L, TOV, OFFRTG, DEFRTG, NETRTG by PTS, REB, AST
+
+str(training)
+
+# log(SALARY_100) and +/- by TOV 
+ggplot(training,aes(x=X..., y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs +/- by TOV",x="+/-",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+# log(SALARY_100) and AGE by TOV => No interaction
+ggplot(training,aes(x=AGE, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs AGE by TOV",x="AGE",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+# log(SALARY_100) and L by TOV => shall include this interaction
+ggplot(training,aes(x=L, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Losses by TOV",x="Losses",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+# log(SALARY_100) and OFFRTG by TOV => No interaction
+ggplot(training,aes(x=OFFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Offensive Rating by TOV",x="Offensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+# log(SALARY_100) and DEFRTG by TOV => shall include this interaction
+ggplot(training,aes(x=DEFRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Defensive Rating by TOV",x="Defensive Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+# log(SALARY_100) and NETRTG by TOV => No interaction
+ggplot(training,aes(x=NETRTG, y=log(SALARY_100))) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="log(SALARY_100) vs Net Rating by TOV",x="Net Rating",y="log(SALARY_100)") +
+  facet_wrap( ~ TOV_fac, ncol=3)
+
+
+
+
+# Take aways
+# - can consider include the above interactions, 
+#   L:PTS, DEFRTG:PTS
+#   L:REB, DEFRTG:REB
+#   L:AST, DEFRTG:AST
+#   L:TOV, DEFRTG:TOV
+```
+
+
+## Model
+As the main purpose of this research is to make predictions, we tend to select fewer predictors which can more precisely stand for the player's value. Thus, we decided to go with stepwise BIC as our model selection approach. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+cov_names <- names(training)
+# cov_names <- cov_names[!cov_names %in% c("SEASON")] 
+
+# Centering all numeric variables for interpretations
+training$AGE_c <- training$AGE - mean(training$AGE)
+training$GP_c <- training$GP - mean(training$GP)
+training$W_c <- training$W - mean(training$W)
+training$L_c <- training$L - mean(training$L)
+training$PTS_c <- training$PTS - mean(training$PTS)
+training$X3PM_c <- training$X3PM - mean(training$X3PM)
+training$REB_c <- training$REB - mean(training$REB)
+training$AST_c <- training$AST - mean(training$AST)
+training$TOV_c <- training$TOV - mean(training$TOV)
+training$STL_c <- training$STL - mean(training$STL)
+training$BLK_c <- training$BLK - mean(training$BLK)
+training$X..._c <- training$X... - mean(training$X...)
+training$OFFRTG_c <- training$OFFRTG - mean(training$OFFRTG)
+training$DEFRTG_c <- training$DEFRTG - mean(training$DEFRTG)
+training$NETRTG_c <- training$NETRTG - mean(training$NETRTG)
+# training$PLAYER_fac <- as.factor(training$PLAYER)
+
+cov_names_c <- names(training)
+cov_names_c <- cov_names_c[!cov_names_c %in% c("L_c")] 
+# ?prof: why L_c will be NA?
+# A: it not make sense! scientically not include all 3 varibale that has a relationship among them, even though there's no NA
+# suugest only netrtg
+# inlcude all 3 then no interpret as there's relationship
+
+# table(training$L)
+# table(training$W)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+p_formula_1 <- as.formula(paste("log(SALARY_100) ~",
+                              paste(cov_names_c[!cov_names_c %in% cov_names],
+                                    collapse = " + ")))
+# str(training)
+# training[training$SALARY == 0,]$SALARY = 1 # smoothing for log(SALARY_100) in the following
+# base model: all main effects, except L
+reg_evalateNBA_1 <- lm(p_formula_1, data= training)
+summary(reg_evalateNBA_1)
+training
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## Model Assessment for base model##
+# - Linearity
+# - Normal Residual
+# - constant variance & independence
+
+# - Linearity: pass
+ggplot(training,aes(x=PTS, y=reg_evalateNBA_1$residual)) +
+  geom_point(alpha = .7) +
+  geom_hline(yintercept=0,col="red3") +
+  theme_classic() +
+  labs(title="Residuals vs Points",x="Points",y="Residuals")
+
+# - constant variance & independence: pass
+plot(reg_evalateNBA_1,which=1,col=c("blue4"))
+# - Normal Residual: pass
+plot(reg_evalateNBA_1,which=2,col=c("blue4"))
+
+# check outlier, high leverage, and influential points
+plot(reg_evalateNBA_1,which=4,col=c("blue4"))
+# no influential points as all cook's distances < 0.5
+
+# nrow(training)
+plot(reg_evalateNBA_1,which=5,col=c("blue4"))
+# high leverage cut-off = 2 * (p+1) / n = 2 * (15+1) / 3835 = 0.008
+# many high leverage points
+# outliers: observation 2281, 2282, 2968
+# training[c(2281, 2282, 2968),]
+
+# - VIF not issue for preditcing purpose
+# multicollinearity check 
+# vif(reg_evalateNBA_1)
+# Advanced statistics: OFFRTG, DEFRTG, and NETRTG have multicollinearity issues
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# ## Second model
+# cov_names_c_2 <- names(training)
+# 
+# # Remove the OFFRTG_c from predictors to avoid multicollinearity issue
+# # Choose OFFRTG to remove since we want to investigate the interaction between DEFRTG and PTS
+# # ?prof: does the above call reasonable? based on EDA, salary seems a lot to do with offensice, 
+# A: make sense to include defrtg, but if do such, inlcude offrtg and defrtg, and exclude netrtg (Key: not incldue all three, further add offrtg won't hurt)
+
+# # instead of defensive
+# cov_names_c_2 <- cov_names_c_2[!cov_names_c_2 %in% c("L_c", "OFFRTG_c")]
+# p_formula_2 <- as.formula(paste("log(SALARY_100) ~",
+#                               paste(cov_names_c_2[!cov_names_c_2 %in% cov_names],
+#                                     collapse = " + ")))
+# # second model
+# reg_evalateNBA_2 <- lm(p_formula_2, data= training)
+# summary(reg_evalateNBA_2)
+# vif(reg_evalateNBA_2)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# # third model: include interactions
+#   L:PTS, DEFRTG:PTS
+#   L:REB, DEFRTG:REB
+#   L:AST, DEFRTG:AST
+#   L:TOV, DEFRTG:TOV => removed due to VIF
+
+reg_evalateNBA_3 <- lm(log(SALARY_100) ~
+                         AGE_c + GP_c + W_c + PTS_c + X3PM_c + REB_c +
+    AST_c + TOV_c + STL_c + BLK_c + X..._c + OFFRTG_c + DEFRTG_c + NETRTG_c +
+    DEFRTG_c:PTS_c + DEFRTG_c:REB_c + DEFRTG_c:AST_c
+    , data= training)
+summary(reg_evalateNBA_3)
+# vif(reg_evalateNBA_3)
+```
+
+##### Multiple Linear Regression
+To proceed with model selection by stepwise BIC, first, we need to decide the null and full models for the stepwise function. We prefer to include as few strong assumptions as possible, so we include no predictors in our null model. For the full model, we include all the main effects and the interactions we found interesting in the EDA, which are _DEFRTG_ : _PTS_, _DEFRTG_ : _REB_, and _DEFRTG_ : _AST_. The outcome model's mathematical equation is as the following:  
+
+$$
+\begin{aligned}
+y_{i} = \beta_{0} + \beta_{1}\ {PTS_{i}} +  \beta_{2}\ {REB_{i}} + \beta_{3}\ {TOV_{i}} + \beta_{4}\ {AGE_{i}} + \beta_{5}\ {GP_{i}} + \beta_{6}\ {W_{i}} + \epsilon _{i};\\ \epsilon _{i}\overset{iid}{\sim} N(0, \sigma^2), i = 1, \ldots, n.
+\end{aligned}
+$$ 
+where $y_{i}$ is log of the player's salary versus salary cap in percentage (%).
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Using stepwise with BIC (for prediction, so need smaller accuracte model)
+n <- nrow(training)
+# reg_evalateNBA_0 <- lm(log(SALARY_100) ~ 
+#                          PTS_c + REB_c + AST_c, data= training)
+reg_evalateNBA_0 <- lm(log(SALARY_100) ~ 1, data= training)
+reg_evalateNBA_4 <- step(reg_evalateNBA_0, 
+                                scope = formula(reg_evalateNBA_3),
+                                direction="both",trace=0,k = log(n))
+# Let's see the variables the model selected
+reg_evalateNBA_4$call
+summary(reg_evalateNBA_4)
+```
+
+We also noted that having logarithm transformation for the original response variable might not be enough for satisfying the normal assumption of linear regression. We also performed the boxcox transformation and obtained a lambda whose value is 0.25, which makes the $y_{i}$ in the above formula be $SALARY\_100^{0.25}$.
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## fifth model: stepwise + boxcox 
+reg_evalateNBA_4_star  <- lm(formula = SALARY_100 ~ 
+                                    PTS_c + W_c + AGE_c + REB_c + TOV_c + GP_c, 
+                                    data = training)
+
+boxcox_trans <- boxcox(reg_evalateNBA_4_star,
+                       lambda = seq(-5, 5, length = 50))
+lambda_trans <- boxcox_trans$x[boxcox_trans$y == max(boxcox_trans$y)]
+lambda_trans
+
+reg_evalateNBA_5 <- lm(SALARY_100^lambda_trans ~ 
+                         PTS_c + W_c + AGE_c + REB_c + TOV_c + GP_c,
+                       data = training) 
+summary(reg_evalateNBA_5)
+
+```
+
+```{r, include=FALSE, echo=FALSE,  message=FALSE, warning=FALSE, fig.align='center', results='asis', fig.height=5, fig.width=8}
+# cat("\\begin{center}")
+# stargazer(reg_UA_1, header=FALSE, float=FALSE, single.row = TRUE, no.space = TRUE, column.sep.width = "3pt",font.size = "small")
+# cat("\\end{center}")
+
+options(xtable.comment = FALSE)
+xtable(reg_evalateNBA_5, type ='latex', title = 'Results of MLR Model', header = FALSE, digits = 4, no.space = TRUE,font.size = "small", caption ="Proposed Model through Multiple Linear Regression",caption.placement = getOption("xtable.caption.placement", "top"))
+```
+
+For the proposed model above, we have conducted its assessment. First, as the below two figures, we confirmed that the constant variance, independence of errors, and normal distribution are met. Further, the linear relationships between response and all the predictors have all been verified. Thus, we confirm all the assumptions of linear regression are met. 
+
+```{r, include = FALSE, echo=FALSE, message = FALSE, warning = FALSE, results='hide', fig.show='hold', out.width="50%"}
+# - constant variance & independence: pass
+plot(reg_evalateNBA_5,which=1,col=c("blue4"), sub.caption=" ")
+# - Normal Residual: pass
+plot(reg_evalateNBA_5,which=2,col=c("blue4"), sub.caption=" ")
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# verification of response normal
+ggplot(training,aes(x=SALARY_100^lambda_trans)) +
+  geom_histogram(aes(y=..density..),
+                 color="black",linetype="dashed", 
+                 binwidth = 0.2, fill=rainbow(13)) +
+  geom_density(alpha=.25, fill="lightblue") +
+  scale_fill_brewer(palette="Blues") +
+  labs(title="Distribution of Salary Percentage",y="Salary percentage") + 
+  theme_classic() + theme(legend.position="none")
+
+# - Linearity: pass
+ggplot(training,aes(x=PTS_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs Points",x="Points",y="Residuals")
+
+ggplot(training,aes(x=REB_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs REB_c",x="REB_c",y="Residuals")
+
+ggplot(training,aes(x=TOV_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs TOV_c",x="TOV_c",y="Residuals")
+
+ggplot(training,aes(x=GP_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs GP_c",x="GP_c",y="Residuals")
+
+ggplot(training,aes(x=W_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs W_c",x="W_c",y="Residuals")
+
+ggplot(training,aes(x=AGE_c, y=reg_evalateNBA_5$residual)) + 
+  geom_point(alpha = .7) +  
+  geom_hline(yintercept=0,col="red3") + 
+  theme_classic() +
+  labs(title="Residuals vs AGE_c",x="AGE_c",y="Residuals")
+
+# - constant variance & independence: pass
+plot(reg_evalateNBA_5,which=1,col=c("blue4"))
+# - Normal Residual: pass
+plot(reg_evalateNBA_5,which=2,col=c("blue4"))
+
+# check outlier, high leverage, and influential points
+plot(reg_evalateNBA_5,which=4,col=c("blue4")) 
+# no influential points as all cook's distances < 0.5
+
+nrow(training)
+plot(reg_evalateNBA_5,which=5,col=c("blue4"))
+# high leverage cut-off = 2 * (p+1) / n = 2 * (6+1) / 3835 = 0.004
+# many high leverage points
+# outliers: observation 2282, 2859, 3682
+training[c(2281, 2282, 2859),]
+```
+
+To validate our proposed model, we applied RMSE as our evaluation metric. First, we made predictions for the testing dataset and the RMSE is 5.31. Then, we conducted K-fold validation to the training dataset with K = 10, and the average RMSE is 5.18. The results are considered acceptable as an initial model, but we do acknowledge there's still room to improve as when the salary cap increases, the exact error in the US dollar rises, too.
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## Model Validation
+testing$AGE_c <- testing$AGE - mean(testing$AGE)
+testing$GP_c <- testing$GP - mean(testing$GP)
+testing$W_c <- testing$W - mean(testing$W)
+testing$L_c <- testing$L - mean(testing$L)
+testing$PTS_c <- testing$PTS - mean(testing$PTS)
+testing$X3PM_c <- testing$X3PM - mean(testing$X3PM)
+testing$REB_c <- testing$REB - mean(testing$REB)
+testing$AST_c <- testing$AST - mean(testing$AST)
+testing$TOV_c <- testing$TOV - mean(testing$TOV)
+testing$STL_c <- testing$STL - mean(testing$STL)
+testing$BLK_c <- testing$BLK - mean(testing$BLK)
+testing$X..._c <- testing$X... - mean(testing$X...)
+testing$OFFRTG_c <- testing$OFFRTG - mean(testing$OFFRTG)
+testing$DEFRTG_c <- testing$DEFRTG - mean(testing$DEFRTG)
+testing$NETRTG_c <- testing$NETRTG - mean(testing$NETRTG)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+y_test_pred <- predict(reg_evalateNBA_5,testing)^(1/lambda_trans)
+testMSE <- mean((testing$SALARY_100 - y_test_pred)^2); testMSE
+RMSE_testing <- sqrt(testMSE)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+y_test_pred_conf <- predict(reg_evalateNBA_5,testing, 
+                       interval = "confidence", level = 0.95)^(1/lambda_trans)
+
+forecast_1 <- cbind(testing$PLAYER, testing$SALARY_100, 
+                    y_test_pred_conf);
+colnames(forecast_1) <- c("PLAYER", "Truth","Predicted",
+                          "Predicted_2.5", "Predicted_97.5")
+forecast_1[1:5,]
+forecast_1 <- as.data.frame(forecast_1, stringsAsFactors = FALSE)
+forecast_1 <- remove_all_labels(forecast_1)
+
+# calculate the percentage of observation lies within the confidence 
+# interval of predictions
+# head(forecast_1)
+# str(forecast_1)
+forecast_1$Truth <- as.numeric(forecast_1$Truth)
+forecast_1$Predicted <- as.numeric(forecast_1$Predicted)
+forecast_1$Predicted_2.5 <- as.numeric(forecast_1$Predicted_2.5)
+forecast_1$Predicted_97.5 <- as.numeric(forecast_1$Predicted_97.5)
+df_accuracte <- forecast_1[(forecast_1$Truth >= forecast_1$Predicted_2.5) & (forecast_1$Truth <= forecast_1$Predicted_97.5),]
+hit_rate_1 <- nrow(df_accuracte)/nrow(testing)*100
+forecast_1[abs(forecast_1$Truth - forecast_1$Predicted) > 15,]
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# K-fold
+set.seed(123) # use whatever number you want
+# Now randomly re-shuffle the data
+K_training <- training[sample(nrow(training)),]; K_training
+# Define the number of folds you want
+K <- 10
+# Define a matrix to save your results into
+RMSE <- matrix(0,nrow=10,ncol=1)
+HIT <- matrix(0,nrow=10,ncol=1)
+# Split the row indexes into k equal parts
+kth_fold <- cut(seq(1,nrow(K_training)),breaks=10,labels=FALSE); kth_fold
+# Now write the for loop for the k-fold cross validation
+for(k in 1:K){
+  # Split your data into the training and test datasets
+  test_index <- which(kth_fold==k)
+  train <- K_training[-test_index,]
+  test <- K_training[test_index,]
+  
+  # Now that you've split the data, 
+  # write your code for computing RMSE for each k here
+  # You should consider using your code for question 7 above
+  reg_evalateNBA_5_train_k <- lm(SALARY_100^lambda_trans ~ 
+                         PTS_c + W_c + AGE_c + REB_c + TOV_c + GP_c,
+                         data=train)
+  
+  y_test_pred_k <- predict(reg_evalateNBA_5_train_k,test)^(1/lambda_trans)
+  RMSE[k,] <- sqrt(mean((test$SALARY_100 - y_test_pred_k)^2))
+
+  y_test_pred_k_conf <- predict(reg_evalateNBA_5_train_k,test,interval = "confidence")^(1/lambda_trans)
+  forecast_2 <- cbind(test$PLAYER, test$SEASON, test$SALARY_100, y_test_pred_k_conf)
+  colnames(forecast_2) <- c("PLAYER", "SEASON", "Truth",
+                            "Predicted","Predicted_2.5",
+                            "Predicted_97.5"); forecast_2[1:5,]
+  forecast_2 <- as.data.frame(forecast_2, stringsAsFactors = FALSE)
+  forecast_2 <- remove_all_labels(forecast_2)
+  forecast_2$Truth <- as.numeric(forecast_2$Truth)
+  forecast_2$Predicted <- as.numeric(forecast_2$Predicted)
+  forecast_2$Predicted_2.5 <- as.numeric(forecast_2$Predicted_2.5)
+  forecast_2$Predicted_97.5 <- as.numeric(forecast_2$Predicted_97.5)
+  df_accuracte_2 <- forecast_2[(forecast_2$Truth >= forecast_2$Predicted_2.5) & (forecast_2$Truth <= forecast_2$Predicted_97.5),]
+  HIT[k,] <- nrow(df_accuracte_2)/nrow(testing)*100
+}
+RMSE
+mean(RMSE)
+  forecast_2 <- data.frame(forecast_2)
+forecast_2 <- forecast_2[order(forecast_2$SEASON),]
+head(forecast_2)
+str(forecast_2)
+HIT
+mean(HIT)
+# underestimate & overestimate
+forecast_2[(forecast_2$PLAYER == "Luka Doncic"),]
+forecast_2[abs(forecast_2$Truth - forecast_2$Predicted) > 15,]
+```
+
+```{r, include = FALSE, echo=FALSE, message=FALSE, warning = FALSE, results='asis'}
+xtable(forecast_2[(forecast_2$PLAYER == "Luka Doncic"),], digits = 2, caption = "One of the Exception Cases")
+```
+
+##### Hierarchical Multiple Linear Regression
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+reg_evalateNBA_5$call
+str(training)
+unique(training$TEAM) # NOH == NOP, NJN == BKN
+training$TEAM[training$TEAM == "NOH"] = "NOP"
+training$TEAM[training$TEAM == "NJN"] = "BKN"
+training$TEAM <- factor(training$TEAM)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## EDA ###
+str(training)
+reg_evalateNBA_5$call
+# group variable effect on response
+ggplot(training,aes(x=TEAM, y=SALARY_100^lambda_trans, fill=TEAM)) +
+  geom_boxplot() + 
+  labs(title="TEAM vs SALARY_100^lambda_trans",x="TEAM",y="SALARY_100^lambda_trans") + 
+  theme_classic() + theme(legend.position="none", axis.text.x = element_text(angle = 90))
+
+# response vs age by team
+ggplot(training,aes(x=AGE_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs AGE_c",x="AGE_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs pts by team
+ggplot(training,aes(x=PTS_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs PTS_c",x="PTS_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs reb by team
+ggplot(training,aes(x=REB_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs REB_c",x="REB_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs ast by team
+ggplot(training,aes(x=AST_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs AST_c",x="AST_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs wins by team
+ggplot(training,aes(x=W_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs W_c",x="W_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs gp by team
+ggplot(training,aes(x=GP_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs GP_c",x="GP_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# response vs TOV by team
+ggplot(training,aes(x=TOV_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs TOV_c",x="TOV_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ TEAM, ncol=6)
+
+# not consider adding random slope for team in the hierarchical model
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# response vs age by season
+ggplot(training,aes(x=AGE_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs AGE_c",x="AGE_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs pts by season
+ggplot(training,aes(x=PTS_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs PTS_c",x="PTS_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs reb by season
+ggplot(training,aes(x=REB_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs REB_c",x="REB_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs ast by season
+ggplot(training,aes(x=AST_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs AST_c",x="AST_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs wins by season
+ggplot(training,aes(x=W_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs W_c",x="W_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs gp by season
+ggplot(training,aes(x=GP_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs GP_c",x="GP_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# response vs TOV by season
+ggplot(training,aes(x=TOV_c, y=SALARY_100^lambda_trans)) +
+  geom_point(alpha = .5,colour="blue4") +
+  geom_smooth(method="lm",col="red3") + theme_classic() +
+  labs(title="SALARY_100^lambda_trans vs TOV_c",x="TOV_c",y="SALARY_100^lambda_trans") +
+  facet_wrap( ~ SEASON, ncol=5)
+
+# not consider adding random slope for team in the hierarchical model
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+## Model ##
+reg_evalateNBA_6 <- lmer(SALARY_100^lambda_trans ~ 
+                           AGE_c + PTS_c + REB_c + 
+                           TOV_c + W_c + GP_c + (1|TEAM), 
+                         data = training)
+summary(reg_evalateNBA_6)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+reg_evalateNBA_7 <- lmer(SALARY_100^lambda_trans ~ 
+                           AGE_c + PTS_c + REB_c + 
+                           TOV_c + W_c + GP_c + (1|SEASON) + (1|TEAM), 
+                         data = training)
+summary(reg_evalateNBA_7)
+# ?prof: how to further improve the model? considering the residual are still up to 80% of variance
+# A: to reduce redsiual (unexplained variance) >> get more variables is most efficient way; add interaction and random slope just help little as not adding new information
+
+anova(reg_evalateNBA_6, reg_evalateNBA_7, test = "Chisq")
+AIC(reg_evalateNBA_6); AIC(reg_evalateNBA_7)
+
+(ranef(reg_evalateNBA_7)$TEAM)["GSW",]
+(ranef(reg_evalateNBA_7)$SEASON)["2019",]
+# avg intercept: 5.24
+mean(training$AGE)
+mean(training$PTS)
+mean(training$REB)
+mean(training$TOV)
+mean(training$W)
+mean(training$GP)
+```
+
+```{r include = FALSE, echo=FALSE,  message=FALSE, warning=FALSE, fig.align='center', results='asis', fig.height=5, fig.width=8}
+cat("\\begin{center}")
+stargazer(reg_evalateNBA_7, title = "Summary of the Proposed Hierarchical Model", header=FALSE, float=FALSE, single.row = TRUE, no.space = TRUE, column.sep.width = "3pt",font.size = "small", digits = 4)
+cat("\\end{center}")
+```
+
+At last, we plan to consider the hierarchical framework and include group variables like _TEAM_ and _SEASON_ in the proposed model above. First, we need to decide whether we shall add both random slope and intercept or only random intercept is required. As during our EDA for the two group variables, we found that there's rarely trend change between the group variables and the other predictors, we concluded that we will simply consider random intercept for our model; Then, the second to decide is whether we shall add both group variables or only one. We performed an anova test for two potential models, the one with random intercepts on both group variables and the one with only the _TEAM_ variable as a random intercept. The null hypothesis is rejected so we decided to apply random intercepts on both group variables. Our proposed model is summarized as below table: 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=5, fig.width=8}
+stargazer(reg_evalateNBA_7, title = "Summary of the Proposed Hierarchical Model", float = TRUE, no.space=TRUE, header=FALSE, single.row=TRUE, font.size="small", digits = 4, ci=TRUE, ci.level=0.95)
+```
+
+```{r, echo=FALSE, message=FALSE, warning = FALSE, results='asis'}
+tb1 <- data.frame(
+  col1 = c("TEAM", "SEASON", "Residual"),
+  col2 = c("(Intercept)", "(Intercept)", " "),
+  col3 = c(0.001028, 0.001729, 0.080197),
+  col4 = c(0.03206, 0.04158, 0.28319)
+  )
+colnames(tb1) <- c("Groups", "Name", "Variance", "Std.Dev.")
+xtable(tb1, digits = 5, caption = "Random Effects of Hierarchical Model")
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', fig.show='hold', out.width="50%"}
+dotplot(ranef(reg_evalateNBA_7,condVar=TRUE))$TEAM 
+dotplot(ranef(reg_evalateNBA_7,condVar=TRUE))$SEASON
+```
+
+For this model, we observed that the variance which could be explained by the two group variables, _TEAM_ and _SEASON_, is only around 20% of the overall variance as the above table shows. This indicates the variance within groups has far from been fully explored and shows the topic deserves more investigations; On the other hand, the across-group variance among teams or seasons could be observed in the above two figures. Grouping by teams, Charlotte Hornets has the highest intercept while the Philadelphia 76ers has the lowest. Only these two teams have intercepts whose confidence intervals do not include zero, which indicates statistically significance. It could be interpreted as the former tends to have fewer players signed with big contracts and high salaries, while the latter tends to have more compared with other teams in the league. When a team has fewer players signed with really high salaries, the average salary for all the players in the team shall increase, considering each team spends roughly the same on their rosters; On the other, grouping by season, we found that before season 2015/16, the league had a positive intercept while after that, the intercept turned into negative. We would interpret that might result from the salary cap increases rapidly since then. Together with the fact that not every player resigns a new contract with a higher annual salary when the salary cap increase, we could reasonably imagine that the percentage of player salary versus salary cap is likely to drop. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# ?prof: HMLR doesn't have the same 1) model assessment and 2) model validation processes as MLR?
+# use the same will have bug
+
+# A: we can, it doable. Use MLR's is fine. 
+# fixed part is the same as MLR
+# resid(); Google: model assesment for mixed effect model, model assesment for lmer
+
+```
+
+Lastly, as the interpretation for our proposed hierarchical model would differ by the random intercept of _TEAM_ and _SEASON_, we simply picked Golden State Warriors (GSW) in the season 2019/20 as an example. Our model predicts that for a 26.6-year-old player in Golden State Warrior in season 2019/20 who had 9.3 PPG, 4.0 RPG, 2.0 APG, won half, 28 of the total games he played, 56, his salary in season 2020/21 is expected to be around 5.1M USD, which is the salary cap, 109140000, multiplying the response, 4.67%. Predictors, except for _GP_, all have a positive correlation with the response variable. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+summary(reg_evalateNBA_7)
+mean(training$AGE)
+mean(training$PTS)
+mean(training$REB)
+mean(training$TOV)
+mean(training$W)
+mean(training$GP)
+(ranef(reg_evalateNBA_7)$TEAM)["GSW",]
+(ranef(reg_evalateNBA_7)$SEASON)["2019",]
+(1.5231979-0.01185845-0.03607144)^(1/lambda_trans) 
+```
+
+## Conclusions
+Our final model confirms that _AGE_ and _TOV_ are indeed statistically significant predictors and both are positively correlated with the response. We consider that could be relevant to the minimum salary guaranteed in the league increases as players play more years. In that way, players' age could roughly be treated as their years of experience in the league. Thus, it makes sense that our response will increase with _AGE_; As for _TOV_, generally, a player who handles the ball more often will likely to conduct more turnovers. In addition, usually, a team will try to have its best player to make plays for other teammates. Thus, no wonder higher turnovers seem lead to a higher salary.
+
+On evaluating our proposed model's performance, we have further defined a metric called Hit Rate. We consider our prediction "hits" the real situation when the absolute difference between the predicted response and the truth is not greater than 5%, which is around 5.5 million USD. In such definition, our model has achieved a 77% hit rate to the testing dataset, the salary in the 2020/21 season. However, when we looked into some of the imprecise prediction cases as below table, which is filtered by the absolute difference between the predicted response and the truth is greater than 15%, we observed the potential limitation of our model and also the future work.
+
+```{r, echo=FALSE, message=FALSE, warning = FALSE, results='asis'}
+# forecast_1[abs(forecast_1$Truth - forecast_1$Predicted) > 5,]
+# forecast_1[abs(forecast_1$Truth - forecast_1$Predicted) > 15,]
+
+xtable(forecast_1[abs(forecast_1$Truth - forecast_1$Predicted) > 15,], digits = 2, caption = "Underpaid and Overpaid Cases")
+```
+
+Firstly, except Luka Doncic, all of the other players mispredicted by our model are overpaid. These players were either all-stars or highly potential when they signed a contract with their teams. As all of their contracts are on a multiple-year basis, they could still get the same amount of salary even when they played worse or even got injured during their contract. Thus, we might need to consider including the contract length as part of our response. Further, some predictors showing either a player's competitive spirit or healthiness could also be our potential predictors; Second, for the overpaid players, we shall try to clarify if there are some variables representing the player's potential or commercial value that our model oversees so that some of the general managers in the NBA are willing to provide a contract that our model identified as not worth it; Lastly, for lowballed players like Luka Doncic, most of them were still in their rookie contract, which limits the maximum salary they could earn in the early stage of their career. Thus, this implies that we shall also include contract type, e.g. Rookie, Bird, RFA, or more types, as one of the predictors. 
