@@ -1,0 +1,592 @@
+---
+title: "Under Armour Project: Member Lost Prediction"
+author: "TegoChang"
+date: "11/25/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+
+library(sjlabelled) # to remove labels
+library(ggplot2)
+library(xtable)
+library(arm) # for binnedpolot
+library(tidyr) # data wrangling
+library(caret) # for confusion matrix
+library(pROC) # for roc curve
+library(stargazer) # for displaying summary of model
+```
+
+## Summary
+In this report, we aim to predict if an existing member of Under Armour is likely to abandon the brand within the following six months. During the analyzing process, we have conducted exploring data analysis (EDA), model selection, assessment, and validation to construct a model with which we think can provide the best prediction to this topic. Our model explains 88% of the training dataset (AUC = 0.88) and predicts that 26% of the existing members might abandon Under Armour within the following six months.  
+  
+## Introduction
+The questions we would like to answer in this analysis include 1) what factors might contribute to the churn rate of an existing user. 2) which members in the testing dataset are likely to abandon Under Armour in the following six months. Further, we would also pay attention to what additional methodologies could be applied to enhance the forecasting model.
+
+## Data
+In this statistical analysis, our inference and interpretation are according to the dataset "train.csv" with some parts of adjustments, including: 
+
+- We store two versions of the Churn variable, numeric and categorical, for analysis easiness. 
+- We set all the other variables to either numeric or factor based on their characteristics in the real world.
+
+```{r data, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+getwd()
+UA_train <- read.csv("./dataset/train.csv", header=TRUE)
+# UA_train <- read.csv("train.csv", header=TRUE, 
+#                      colClasses = c("numeric", "numeric", "numeric", "numeric", 
+#                                     "numeric", "numeric", "numeric", "factor",
+#                                     "factor", "numeric", "numeric", "numeric",
+#                                     "factor", "factor", "factor", "factor",
+#                                     "factor","factor"))
+UA_train$apparell_spend <- as.numeric(as.character(UA_train$apparell_spend))
+UA_train$acc_spend <- as.numeric(UA_train$acc_spend)
+UA_train$custserv_calls <- as.numeric(UA_train$custserv_calls)
+UA_train$churn <- as.numeric(UA_train$churn)
+UA_train$acc_purchasers <- as.factor(UA_train$acc_purchasers)
+UA_train$promo_purchaser <- as.factor(UA_train$promo_purchaser)
+UA_train$shoe_orders <- as.numeric(UA_train$shoe_orders)
+UA_train$apparel_orders <- as.numeric(UA_train$apparel_orders)
+UA_train$acc_orders <- as.numeric(UA_train$acc_orders)
+UA_train$ecommShopper <- as.factor(UA_train$ecommShopper)
+UA_train$bhShopper <- as.factor(UA_train$bhShopper)
+UA_train$area_code <- as.factor(UA_train$area_code)
+UA_train$churn_fac <- as.factor(UA_train$churn)
+
+UA_train <- UA_train %>% drop_na()
+
+head(UA_train)
+str(UA_train)
+
+UA_test <- read.csv("./dataset/test.csv", header=TRUE)
+
+UA_test$apparell_spend <- as.numeric(as.character(UA_test$apparell_spend))
+UA_test$acc_spend <- as.numeric(UA_test$acc_spend)
+UA_test$custserv_calls <- as.numeric(UA_test$custserv_calls)
+UA_test$acc_purchasers <- as.factor(UA_test$acc_purchasers)
+UA_test$promo_purchaser <- as.factor(UA_test$promo_purchaser)
+UA_test$shoe_orders <- as.numeric(UA_test$shoe_orders)
+UA_test$apparel_orders <- as.numeric(UA_test$apparel_orders)
+UA_test$acc_orders <- as.numeric(UA_test$acc_orders)
+UA_test$ecommShopper <- as.factor(UA_test$ecommShopper)
+UA_test$bhShopper <- as.factor(UA_test$bhShopper)
+UA_test$area_code <- as.factor(UA_test$area_code)
+
+UA_test <- UA_test %>% drop_na()
+
+
+head(UA_test)
+str(UA_test)
+```
+
+Based on the arranged dataset, we then start exploring data analysis (EDA). First, we check on all the numeric predictor variables' relation with the response variable, _churn_. We found that:
+
+1. _max_discount_ People who abandon the brand seems to get less discount. 
+2. _shoe_spend_ People who abandon the brand pay more for shoes.
+
+```{r, include= FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=3, fig.width=4}
+# Plot last_purchase vs churn_fac 
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=last_purchase, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Last Purchase vs Churn", x="Churn",y="Last Purchase") + 
+  theme_classic() + theme()
+# No obvious relationship between Last Purchase and Churn.
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.show='hold', out.width="50%"}
+# Plot max_discount vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=max_discount, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Max Discount vs Churn", x="Churn",y="Max Discount") + 
+  theme_classic() + theme()
+# People abandon brand seems to get less discount. 
+
+# str(UA_train)
+# Plot shoe_spend vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Shoe Spend vs Churn", x="Churn",y="Shoe Spend") + 
+  theme_classic() + theme()
+# People abandon brand pay more for shoes.
+```
+
+3. _custserv_calls_ People who abandon the brand call custom service more.
+4. _shoe_orders_ More Shoe Order seems to have a higher Churn rate. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.show='hold', out.width="50%"}
+# str(UA_train)
+# Plot custserv_calls vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=custserv_calls, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Custom Service Calls vs Churn", x="Churn",y="Custom Service Calls") + 
+  theme_classic() + theme()
+# People abandon brand call custom service more.
+
+# str(UA_train)
+# Plot shoe_orders vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=shoe_orders, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Shoe Orders vs Churn", x="Churn",y="Shoe Orders") + 
+  theme_classic() + theme()
+# More shoe order seems to have a higher Churn rate. 
+```
+
+5. _apparell_spend_ People who abandon the brand seem to pay more for Apparell. However, the difference is not obvious. 
+6. _apparel_orders_ More Apparel Order seems to have a higher Churn rate. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.show='hold', out.width="50%"}
+# str(UA_train)
+# Plot apparell_spend vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=apparell_spend, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Apparell Spend vs Churn", x="Churn",y="Apparell Spend") + 
+  theme_classic() + theme()
+# People abandon brand seems to pay more for Apparell. However, the difference is not obvious. 
+
+# str(UA_train)
+# Plot apparel_orders vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=apparel_orders, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Apparel Orders vs Churn", x="Churn",y="Apparel Orders") + 
+  theme_classic() + theme()
+# More Apparel Order seems to have a higher Churn rate.
+```
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=3, fig.width=4}
+# str(UA_train)
+# Plot acc_spend vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=acc_spend, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Acc Spend vs Churn", x="Churn",y="Acc Spend") + 
+  theme_classic() + theme()
+# No obvious relationship between Acc Spend and Churn.
+```
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=3, fig.width=4}
+# str(UA_train)
+# Plot acc_orders vs churn_fac
+ggplot(UA_train, aes(x=churn_fac, y=acc_orders, fill=churn_fac)) +
+  geom_boxplot() +
+  labs(title="Acc Orders vs Churn", x="Churn",y="Acc Orders") + 
+  theme_classic() + theme()
+# Acc Orders tend to have no obvious impact on Churn rate. 
+```
+
+Then, we check on all the categorical variables' relation with the response variable, _churn_. We found that:
+
+7. _acc_purchasers_ ACC Purchaser has a higher Churn rate. 
+8. _promo_purchaser_ Promo Purchaser has a lower Churn rate. 
+9. _gender_ Male tends to have a little less Churn rate compared with Female. 
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.show='hold', out.width="33%"}
+# str(UA_train)
+# print(xtable(table(UA_train$acc_purchasers, UA_train$churn_fac)), comment = FALSE)
+table_acc <- table(UA_train$acc_purchasers, UA_train$churn_fac)
+names(dimnames(table_acc)) <- c("ACC Purchaser", "Churn")
+table_acc
+# ACC Purchaser has a higher Churn rate. 
+
+# str(UA_train)
+# print(xtable(table(UA_train$acc_purchasers, UA_train$churn_fac)), comment = FALSE)
+table_promo <- table(UA_train$promo_purchaser, UA_train$churn_fac)
+names(dimnames(table_promo)) <- c("Promo Purchaser", "Churn")
+table_promo
+# Promo Purchaser has a lower Churn rate. 
+
+# str(UA_train)
+# print(xtable(table(UA_train$gender, UA_train$churn_fac)), comment = FALSE)
+table_gender <- table(UA_train$gender, UA_train$churn_fac)
+names(dimnames(table_gender)) <- c("Gender", "Churn")
+table_gender
+# Male tends to have a little less Churn rate compare with Female. 
+```
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=3, fig.width=4}
+# str(UA_train)
+# print(xtable(table(UA_train$ecommShopper, UA_train$churn_fac)), comment = FALSE)
+table_ecommShopper <- table(UA_train$ecommShopper, UA_train$churn_fac)
+names(dimnames(table_ecommShopper)) <- c("EcommShopper", "Churn")
+table_ecommShopper
+283/(1583+283)
+115/(680+115)
+# ecommShopper tend to have no obvious impact on Churn Rate. 
+```
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis', fig.height=3, fig.width=4}
+str(UA_train)
+# print(xtable(table(UA_train$bhShopper, UA_train$churn_fac)), comment = FALSE)
+table_bhShopper <- table(UA_train$bhShopper, UA_train$churn_fac)
+names(dimnames(table_bhShopper)) <- c("bhShopper", "Churn")
+table_bhShopper
+124/(692+124)
+274/(1576+274)
+# bhShopper tend to have no obvious impact on Churn Rate. 
+```
+
+At the last of EDA, we would like to know if there are interactions between the predictors. As the combinations of the predictors are too many to investigate one by one, we only pick up the pairs that we think are most likely to have mutual relationships in between. After investigations on several combinations, we decided that we might include the below three interactions into our model:
+
+1. _shoe_spend_ : _custserv_calls_
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', out.width="50%", fig.align='center'}
+# fig.align='center', fig.height=2.5, fig.width=5.5
+UA_train$custserv_calls_fac <- 0
+UA_train$custserv_calls_fac[UA_train$custserv_calls == 1] <- 1
+UA_train$custserv_calls_fac[UA_train$custserv_calls == 2] <- 2
+UA_train$custserv_calls_fac[UA_train$custserv_calls == 3] <- 3
+UA_train$custserv_calls_fac[UA_train$custserv_calls == 4] <- 4
+UA_train$custserv_calls_fac[UA_train$custserv_calls >= 5] <- 5
+# table(UA_train$custserv_calls_fac)
+UA_train$custserv_calls_fac <- as.factor(UA_train$custserv_calls_fac)
+
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Spend vs Churn by Custom Service Calls",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~custserv_calls_fac, ncol=6)
+```
+
+2. _custserv_calls_ : _acc_purchasers_
+3. _shoe_spend_ : _promo_purchaser_
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', fig.show='hold', out.width="50%"}
+# str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=custserv_calls, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Custom Service Calls vs churn_fac by Acc Purchasers",
+       x="Churn",y="Custom Service Calls") +
+  theme_classic() + theme() + 
+  facet_wrap(~acc_purchasers)
+
+# str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Spend vs churn_fac by Promo Purchaser",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~promo_purchaser)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=max_discount, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Max Discount vs churn_fac by Gender",
+       x="Churn",y="Max Discount ") +
+  theme_classic() + theme() + 
+  facet_wrap(~gender)
+
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Spend vs churn_fac by Gender",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~gender)
+
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=custserv_calls, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Custom Service Calls vs churn_fac by Gender",
+       x="Churn",y="Custom Service Calls") +
+  theme_classic() + theme() + 
+  facet_wrap(~gender)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+
+ggplot(UA_train, aes(x=churn_fac, y=max_discount, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Max Discount vs churn_fac by Custom Service Calls",
+       x="Churn",y="Max Discount") +
+  theme_classic() + theme() + 
+  facet_wrap(~custserv_calls_fac, ncol=3)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=max_discount, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Max Discount vs churn_fac by Acc Purchasers",
+       x="Churn",y="Max Discount ") +
+  theme_classic() + theme() + 
+  facet_wrap(~acc_purchasers)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Spend vs churn_fac by Acc Purchasers",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~acc_purchasers)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=max_discount, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Max Discount vs churn_fac by Promo Purchaser",
+       x="Churn",y="Max Discount ") +
+  theme_classic() + theme() + 
+  facet_wrap(~promo_purchaser)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+ggplot(UA_train, aes(x=churn_fac, y=custserv_calls, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Custom Service Calls vs churn_fac by Promo Purchaser",
+       x="Churn",y="Custom Service Calls") +
+  theme_classic() + theme() + 
+  facet_wrap(~promo_purchaser)
+```
+
+## Modeling
+
+As the response variable is binary in this research, we decide to build a logistic regression model to answer the questions of interest. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Another look with the relationship between response and the continuous predictors
+str(UA_train)
+# Not obvious
+binnedplot(y=UA_train$churn,UA_train$max_discount,xlab="max_discount",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Binned max_discount and churn",col.int="white")
+
+binnedplot(y=UA_train$churn,UA_train$shoe_spend,xlab="custserv_calls",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Shoe Spend and churn",col.int="white")
+
+binnedplot(y=UA_train$churn,UA_train$custserv_calls,xlab="custserv_calls",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Custom Service Calls and churn",col.int="white")
+
+binnedplot(y=UA_train$churn,UA_train$shoe_orders,xlab="shoe_orders",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Binned shoe_orders and churn",col.int="white")
+
+binnedplot(y=UA_train$churn,UA_train$apparel_orders,xlab="apparel_orders",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Binned apparel_orders and churn",col.int="white")
+
+binnedplot(y=UA_train$churn,UA_train$apparell_spend,xlab="apparell_spend",ylim=c(0,1),col.pts="navy",
+           ylab ="churn?",main="Binned apparell_spend and churn",col.int="white")
+```
+
+
+##### Model Selection
+As our primary goal is to make predictions according to the testing dataset, test.csv, we consider to have fewer predictors included in our model in order to make better predictions. Thus, we decided to apply stepwise function with BIC as our model selection approach. The Null model only includes the two predictors, _shoe_spend_ and _custserv_calls_, which we found most significant in the relationship with our response, _churn_; On the other hand, the full model includes the nine predictors, which we found indicating certain relationships with _churn_, and the three interactions mentioned in the previous sections.  
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Model selection
+str(UA_train)
+reg_UA_null <- glm(churn ~ shoe_spend + custserv_calls_fac, 
+                data = UA_train, 
+               family = binomial)
+summary(reg_UA_null)
+
+reg_UA_full <- glm(churn ~ max_discount + shoe_spend + custserv_calls_fac + acc_purchasers + 
+                  promo_purchaser + shoe_orders + apparel_orders + gender + apparell_spend + 
+                  shoe_spend:custserv_calls_fac + custserv_calls_fac:acc_purchasers + 
+                  shoe_spend:promo_purchaser, 
+                data = UA_train, 
+               family = binomial)
+summary(reg_UA_full)
+
+n <- nrow(UA_train)
+reg_UA_1 <- step(reg_UA_null, scope = formula(reg_UA_full), 
+                 direction="both",trace=0,k = log(n))
+# Let's see the variables the model selected
+reg_UA_1$call
+summary(reg_UA_1)
+```
+
+Below lists the mathematical equation of the model suggested by stepwise BIC:
+
+$$
+\begin{aligned}
+y_{i} = \beta_{0} + \beta_{1}\ {shoe\_spend_{i}} +  \beta_{2}\ {custserv\_calls_{i}} + \beta_{3}\ {acc\_purchasers_{i}} + \\ \beta_{4}\ {promo\_purchaser_{i}} + \beta_{5}\ {apparell\_spend_{i}} + \beta_{6}\ {shoe\_orders_{i}} + \\ \beta_{7}\ {shoe\_spend_{i}} : {custserv\_calls_{i}} + \beta_{8}\ {shoe\_spend_{i}} : {promo\_purchaser_{i}} +\\ \epsilon _{i}; \epsilon _{i}\overset{iid}{\sim} N(0, \sigma^2), i = 1, \ldots, n.
+\end{aligned}
+$$ 
+
+where $y_{i}$ is log-odds of existing members abandoning the brand. Just to be safe, we also conduct an anova Chi-square test to confirm that the model selected by stepwise BIC is indeed statistically different from the full model we mentioned above. The summary table of our proposed model is listed in below table. We can tell that all main effects and most of the interactions are statistically significant with a P-value a lot less than 0.05. This states that these predictors and interactions are very influential in predicting whether an existing member will abandon the branding shortly. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+anova(reg_UA_full, reg_UA_1, test= "Chisq")
+```
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE, fig.align='center', results='asis', fig.height=5, fig.width=8}
+# cat("\\begin{center}")
+# stargazer(reg_UA_1, header=FALSE, float=FALSE, single.row = TRUE, no.space = TRUE, column.sep.width = "3pt",font.size = "small")
+# cat("\\end{center}")
+
+options(xtable.comment = FALSE)
+xtable(reg_UA_1, type ='latex', title = 'Results of Our Model', header = FALSE, digits = 2, no.space = TRUE,font.size = "small", caption ="Logistic Regression Results (Log Odds Scale)",caption.placement = getOption("xtable.caption.placement", "top"))
+```
+
+##### Model Assessment
+When diagnosing the model, we only plotted the binned raw residuals versus predicted probabilities, _shoe_spend_, and _apparell_spend_ as the other binned plots of other variables like _custserv_calls_ contain few data points for us to verify the assumption. In the first plot, residuals versus predicted probabilities, we found that there are only three data points outside the red line, the 2 Standard Error bands coverage. However, the distribution of the data points seems doesn't have a random pattern, which violates the assumptions of logistic regression. This could be an issue for us to investigate in the future. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', out.width="50%", fig.align='center'}
+rawresid1 <- residuals(reg_UA_1,"resp")
+binnedplot(x=fitted(reg_UA_1),y=rawresid1,xlab="Pred. probabilities",
+           col.int="red4",ylab="Avg. residuals",main="Binned residual plot",col.pts="navy")
+```
+
+In the second figure, residuals versus _shoe_spend_, it has the similiar phenomenon as the first one: the data points within have a non-randomized pattern, and some points exceed the 2 Standard Error bands coverage. This indicates conducting transformations with _shoe_spend_ might be necessary; In the last figure, residuals versus _apparell_spend_, the data points within has a randomized pattern and only few points exceed the 2 Standard Error bands coverage. This means we don't have to do any transformation with _apparell_spend_. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', fig.show='hold', out.width="50%"}
+binnedplot(x=UA_train$shoe_spend,y=rawresid1,xlab="Shoe Spend",
+           col.int="red4",ylab="Avg. residuals",main="Binned residual plot",col.pts="navy")
+
+binnedplot(x=UA_train$apparell_spend,y=rawresid1,xlab="Apparell Spend",
+           col.int="red4",ylab="Avg. residuals",main="Binned residual plot",col.pts="navy")
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+binnedplot(x=UA_train$custserv_calls,y=rawresid1,xlab="Custom Service Calls",
+           col.int="red4",ylab="Avg. residuals",main="Binned residual plot",col.pts="navy")
+```
+
+##### Model Validation
+
+We then started to proceed with the validation part for our proposed model. We built the confusion matrix for our model with the threshold set to be 1) 0.5, which means that if the predicted probability exceeds 0.5, we consider the member will be lost and 2) the one suggested by the ROC curve, 0.144. The corresponding performance and the ROC curve are shown as below:
+
+- Accuracy: 0.89
+- Sensitivity: 0.44 & Specificity: 0.97
+- The best threshold is 0.144 (Specificity: 0.83, Sensitivity: 0.83) and comes with AUC 0.88
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+Conf_mat <- confusionMatrix(as.factor(ifelse(fitted(reg_UA_1) >= 0.5, "1","0")),
+                            as.factor(UA_train$churn),positive = "1")
+Conf_mat$table
+Conf_mat$overall["Accuracy"];
+Conf_mat$byClass[c("Sensitivity","Specificity")] #True positive rate and True negative rate
+
+mean(UA_train$churn)
+Conf_mat <- confusionMatrix(as.factor(ifelse(fitted(reg_UA_1) >= mean(UA_train$churn), "1","0")),
+                            as.factor(UA_train$churn),positive = "1")
+Conf_mat$table
+Conf_mat$overall["Accuracy"];
+Conf_mat$byClass[c("Sensitivity","Specificity")]
+
+
+Conf_mat <- confusionMatrix(as.factor(ifelse(fitted(reg_UA_1) >= 0.144, "1","0")),
+                            as.factor(UA_train$churn),positive = "1")
+Conf_mat$table
+Conf_mat$overall["Accuracy"];
+Conf_mat$byClass[c("Sensitivity","Specificity")]
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='asis', results='hide', out.width="50%", fig.align='center'}
+roc(UA_train$churn,fitted(reg_UA_1),plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+```
+
+## Conclusion & Future Work
+
+Based on our proposed model, we make predictions for the testing dataset, test.csv. According to the suggested threshold from ROC curve, we assume that if the predicted probability exceeds 0.144, we consider the member will be lost. The result shows that 175 among 667 members are expected to abandon the brand within the following six months, which is around 26%. These members are identified in the last column of test.csv, _churn_.
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_test)
+UA_test$custserv_calls_fac <- 0
+UA_test$custserv_calls_fac[UA_test$custserv_calls == 1] <- 1
+UA_test$custserv_calls_fac[UA_test$custserv_calls == 2] <- 2
+UA_test$custserv_calls_fac[UA_test$custserv_calls == 3] <- 3
+UA_test$custserv_calls_fac[UA_test$custserv_calls == 4] <- 4
+UA_test$custserv_calls_fac[UA_test$custserv_calls >= 5] <- 5
+table(UA_test$custserv_calls_fac)
+UA_test$custserv_calls_fac <- as.factor(UA_test$custserv_calls_fac)
+
+pred <- predict(reg_UA_1, UA_test, type='response')
+pred[pred >= 0.144] <- 1
+pred[pred < 0.144] <- 0
+length(pred)
+sum(pred)
+nrow(UA_test)
+
+forecast <- cbind(UA_test, pred)
+forecast
+str(forecast)
+colnames(forecast)[19] <- "churn"
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+write.csv(forecast,"test.csv", row.names = FALSE)
+```
+
+##### Hierarchical Model
+
+In this research, we also noticed that the proposed model can be further constructed into a hierarchical model with _state_ applied as a group variable. EDA for the relationships between _state_ and some of the significant predictors are conducted as below figures. Though the interactions seem not very obvious, it could still be a direction that this research can be further extended. 
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+str(UA_train)
+# EDA
+reg_UA_1$call
+summary(reg_UA_1)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# table(UA_train$state)
+# Not obvious interaction
+ggplot(UA_train, aes(x=churn_fac, y=shoe_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Spend vs churn_fac by State",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~state, ncol=14)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Not obvious interaction
+ggplot(UA_train, aes(x=churn_fac, y=custserv_calls, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Custom Service Calls vs churn_fac by State",
+       x="Churn",y="Shoe Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~state, ncol=14)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Not obvious interaction
+ggplot(UA_train, aes(x=churn_fac, y=apparell_spend, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Apparell Spend vs churn_fac by State",
+       x="Churn",y="Apparell Spend") +
+  theme_classic() + theme() + 
+  facet_wrap(~state, ncol=14)
+```
+
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+# Not interaction
+ggplot(UA_train, aes(x=churn_fac, y=shoe_orders, fill=churn_fac)) +
+  geom_boxplot() + 
+  labs(title="Shoe Orders vs churn_fac by State",
+       x="Churn",y="Shoe Orders") +
+  theme_classic() + theme() + 
+  facet_wrap(~state, ncol=14)
+```
+
+```{r, include= FALSE, echo=FALSE, message = FALSE, warning = FALSE}
+reg_UA_1
+reg_UA_1_H <- glmer(churn ~ shoe_spend + custserv_calls_fac + acc_purchasers +
+    promo_purchaser + apparell_spend + shoe_orders + shoe_spend:custserv_calls_fac +
+    shoe_spend:promo_purchaser + (1|state),
+    family = binomial, data = UA_train)
+# ?prof: model failed to converge, how to handle?
+# A: isolate where the problem comes from, start taking out variable one by one, 
+# keep random intercept, and leave others one by one
+# when having many factor varibales, need enough data to make it converge, or take out some interactions between factor variable
+# change the optimizaer, refer to project2 
+
+# no.2 doing to much >> always factor variable
+# Model is nearly unidentifiable: very large eigenvalue
+#  - Rescale variables?
+# >>>  take out some interactions between factor variable
+
+# then # change the optimizaer, refer to project2 
+
+# during the process, explore which interaction don;t have enough data
+
+summary(reg_UA_1_H)
+```
